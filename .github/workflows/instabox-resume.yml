@@ -1,0 +1,116 @@
+name: Instabox auto-resume
+
+# Menjaga mesin Instabox tetap hidup (dijalankan dari GitHub Actions).
+# Secrets yang dibutuhkan (Settings -> Secrets and variables -> Actions):
+#   INSTABOX_API_KEY     : API key dari dashboard (Profile -> API keys)
+#   INSTABOX_MACHINE_ID  : ID mesin, bentuknya m_xxxxxxxx...
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # tiap 5 menit (GitHub bisa telat beberapa menit)
+  workflow_dispatch:         # tombol jalankan manual
+
+concurrency:
+  group: instabox-resume
+  cancel-in-progress: false
+
+jobs:
+  ensure-running:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Cek mesin, resume/start bila perlu
+        env:
+          INSTABOX_API_KEY: ${{ secrets.INSTABOX_API_KEY }}
+          MACHINE_ID: ${{ secrets.INSTABOX_MACHINE_ID }}
+        run: |
+          set -euo pipefail
+          API="https://api.instabox.sh/v1"
+
+          api() { # api METHOD PATH [extra curl args]
+            local method="$1" path="$2"; shift 2
+            curl -sS -X "$method" "$API$path" \
+              -H "X-API-Key: $INSTABOX_API_KEY" "$@"
+          }
+
+          STATE=$(api GET "/machines/$MACHINE_ID" | jq -r '.state')
+          echo "State mesin: $STATE"
+
+          case "$STATE" in
+            running)
+              echo "Sudah running, tidak ada yang dilakukan."
+              exit 0
+              ;;
+            suspended)
+              ACTION="resume"
+              ;;
+            stopped)
+              ACTION="start"
+              ;;
+            creating|starting|resuming|suspending|stopping)
+              echo "Mesin sedang transisi ($STATE), dicek lagi di jadwal berikutnya."
+              exit 0
+              ;;
+            *)
+              echo "::error::State tidak terduga: $STATE (cek dashboard)"
+              exit 1
+              ;;
+          esac
+
+          echo "Menjalankan: $ACTION"
+          RESP=$(api POST "/machines/$MACHINE_ID/$ACTION" \
+            -H "Idempotency-Key: $(uuidgen)" -w '\n%{http_code}')
+          CODE=$(echo "$RESP" | tail -n1)
+          BODY=$(echo "$RESP" | sed '$d')
+
+          ERR_CODE=$(echo "$BODY" | jq -r '.error.code // empty' 2>/dev/null || true)
+          ERR_MSG=$(echo "$BODY" | jq -r '.error.message // empty' 2>/dev/null || true)
+
+          # Kuota / cooldown bukan kegagalan: lewati putaran ini, coba lagi nanti.
+          if [ "$CODE" = "429" ] || [ "$ERR_CODE" = "quota_exceeded" ] \
+             || [ "$ERR_CODE" = "cooldown" ] \
+             || echo "$ERR_MSG" | grep -qi "cooldown"; then
+            echo "::warning::$ACTION ditunda (HTTP $CODE, ${ERR_CODE:-tanpa kode}): ${ERR_MSG:-limit/cooldown aktif}. Dilewati, coba lagi di jadwal berikutnya."
+            exit 0
+          fi
+
+          if [ "$CODE" = "409" ]; then
+            echo "Operasi lain sedang berjalan (409), dilewati."
+            echo "$BODY"
+            exit 0
+          fi
+          if [ "$CODE" != "202" ]; then
+            echo "::error::$ACTION gagal, HTTP $CODE"
+            echo "$BODY"
+            exit 1
+          fi
+
+          OP_ID=$(echo "$BODY" | jq -r '.id')
+          echo "Operation: $OP_ID"
+
+          # Tunggu operasi selesai (maks ~4 menit)
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            OP=$(api GET "/operations/$OP_ID?wait=25s")
+            OP_STATE=$(echo "$OP" | jq -r '.state')
+            echo "[$i] state=$OP_STATE phase=$(echo "$OP" | jq -r '.phase // "-"')"
+            if [ "$OP_STATE" = "succeeded" ]; then
+              READY=$(echo "$OP" | jq -r '.machine.runtime.ready // "unknown"')
+              echo "Berhasil. runtime.ready=$READY"
+              exit 0
+            fi
+            if [ "$OP_STATE" = "failed" ]; then
+              OP_ERR_CODE=$(echo "$OP" | jq -r '.error.code // empty')
+              OP_ERR_MSG=$(echo "$OP" | jq -r '.error.message // empty')
+              if [ "$OP_ERR_CODE" = "quota_exceeded" ] || [ "$OP_ERR_CODE" = "cooldown" ] \
+                 || echo "$OP_ERR_MSG" | grep -qi "cooldown"; then
+                echo "::warning::Operasi $OP_ID ditunda (${OP_ERR_CODE:-tanpa kode}): ${OP_ERR_MSG:-limit/cooldown aktif}. Dilewati."
+                exit 0
+              fi
+              echo "::error::Operasi gagal"
+              echo "$OP" | jq '.error'
+              exit 1
+            fi
+          done
+
+          echo "::warning::Operasi belum selesai setelah batas tunggu"
+          exit 1
