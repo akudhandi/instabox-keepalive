@@ -1,0 +1,18 @@
+name = "instabox-keeper"
+main = "worker.js"
+compatibility_date = "2026-10-01"
+
+# Cek mesin tiap 2 menit
+[triggers]
+crons = ["*/2 * * * *"]
+
+[vars]
+MACHINE_ID = "m_agqwsusmr5naqzf6nztn6q5gyy"
+# Isi dengan "url" dari hasil publish port (lihat langkah 3), lalu hapus tanda #:
+KEEPALIVE_URL = "https://8080-agqwsusmr5naqzf6nztn6q5gyy.instabox.tech"
+
+# INSTABOX_API_KEY JANGAN ditulis di sini.
+# Simpan sebagai secret:  npx wrangler secret put INSTABOX_API_KEY
+
+   [observability]
+   enabled = true
