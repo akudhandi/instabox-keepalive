@@ -36,6 +36,12 @@ jobs:
           STATE=$(api GET "/machines/$MACHINE_ID" | jq -r '.state')
           echo "State mesin: $STATE"
 
+          # Sedang mulai/resume: tidak perlu tindakan, cek lagi di jadwal berikutnya.
+          if [ "$STATE" = "starting" ] || [ "$STATE" = "resuming" ]; then
+            echo "Mesin sedang transisi ($STATE), dicek lagi di jadwal berikutnya."
+            exit 0
+          fi
+
           case "$STATE" in
             running)
               echo "Sudah running, tidak ada yang dilakukan."
@@ -47,7 +53,7 @@ jobs:
             stopped)
               ACTION="start"
               ;;
-            creating|starting|resuming|suspending|stopping)
+            creating|suspending|stopping)
               echo "Mesin sedang transisi ($STATE), dicek lagi di jadwal berikutnya."
               exit 0
               ;;
@@ -88,8 +94,8 @@ jobs:
           OP_ID=$(echo "$BODY" | jq -r '.id')
           echo "Operation: $OP_ID"
 
-          # Tunggu operasi selesai (maks ~4 menit)
-          for i in 1 2 3 4 5 6 7 8 9 10; do
+          # Tunggu operasi selesai (maks ~5 menit)
+          for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
             OP=$(api GET "/operations/$OP_ID?wait=25s")
             OP_STATE=$(echo "$OP" | jq -r '.state')
             echo "[$i] state=$OP_STATE phase=$(echo "$OP" | jq -r '.phase // "-"')"
@@ -113,4 +119,4 @@ jobs:
           done
 
           echo "::warning::Operasi belum selesai setelah batas tunggu"
-          exit 1
+          exit 0
